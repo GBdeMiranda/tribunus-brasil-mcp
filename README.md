@@ -47,7 +47,9 @@ Add the following to your MCP client configuration (e.g. `claude_desktop_config.
 
 ## Available Tools
 
-All tools return structured, LLM-optimized JSON:
+All tools return structured, LLM-optimized JSON.
+
+Every parliamentarian tool accepts either `name` or `parliamentarianId` (Senate `CodigoParlamentar` or Chamber deputy id). Ambiguous names (e.g. `"Lira"` → Arthur Lira / Átila Lira) are never guessed: the tool returns an error with the list of `candidatos` to retry with. Results carry a `metadados` block (source URL, period, record count, completeness, limitations) so every figure can be audited.
 
 1. **`getParliamentarianProfile(name, house, includeVotes, limit)`**:
    - Retrieves the unified bicameral profile of any Brazilian parliamentarian (Senator or Federal Deputy).
@@ -62,13 +64,15 @@ All tools return structured, LLM-optimized JSON:
 
 4. **`getParliamentarianExpenses(name, house, year, month, limit)`**:
    - Retrieves itemized and aggregated CEAP (*Cota para o Exercício da Atividade Parlamentar*) expenditures.
-   - Calculates total spending, categorical breakdown (airfare, housing, publicity, advisory), and top supplier receipts.
+   - Calculates total spending, categorical breakdown (airfare, housing, publicity, advisory), top suppliers, and (Chamber) receipts without a digitized document.
+   - Built from the complete yearly records, not a single API page.
 
 5. **`getParliamentarianActivity(name, house, startDate, endDate, limit)`**:
    - Retrieves institutional activity records including plenary sessions, committee deliberations, public hearings, and floor speeches.
 
 6. **`getParliamentarianVotes(name, house, limit, year)`**:
    - Retrieves nominal roll-call voting records, detailing bill subjects and the legislator's specific vote positions (`Sim`, `Não`, `Abstenção`, `Obstrução`).
+   - Reports plenary participation (roll calls held vs. votes cast); for the Senate, justified and unjustified absences are separated.
 
 7. **`evaluateParliamentarian(name, house, year)`**:
    - Consolidates biographical data, CEAP expenses, committee assignments, authored proposals, attendance, and roll-call votes alongside the qualitative **Matriz de Postura Parlamentar (MPP)** guidelines.
@@ -82,6 +86,10 @@ All tools return structured, LLM-optimized JSON:
 
 - **Federal Senate**: `https://legis.senado.leg.br/dadosabertos`
 - **Chamber of Deputies**: `https://dadosabertos.camara.leg.br/api/v2`
+- **Chamber bulk files** (CEAP, roll-call votes): `https://www.camara.leg.br/cotas/` and `https://dadosabertos.camara.leg.br/arquivos/`
+- **Senate CEAPS**: `https://adm.senado.gov.br/adm-dadosabertos/api/v1`
+
+Bulk files are cached in `~/.cache/tribunus-brasil-mcp` (override with `TRIBUNUS_CACHE_DIR`): refreshed daily for the current year, monthly for past years. The first call for a year downloads ~70 MB for the Chamber.
 
 ## License
 

@@ -1,11 +1,12 @@
+import asyncio
 import json
 import sys
-import urllib.parse
 from mcp.server.fastmcp import FastMCP
 
 from .utils import make_request, fetch_document_content, extract_text_from_pdf
 from .transparency import get_parliamentarian_expenses
-from .activity import get_parliamentarian_activity, get_parliamentarian_votes
+from .activity import _get_deputy_votes, _get_senator_votes, get_parliamentarian_activity, get_parliamentarian_votes
+from .identity import resolve_parliamentarian
 from .evaluation import evaluate_parliamentarian
 from .themes import search_congressional_themes
 
@@ -25,31 +26,16 @@ def _find_document_url(data: list | dict | None) -> str | None:
     return None
 
 
-async def _get_senator(name: str, include_votes: bool = False, limit: int = 5) -> dict | None:
-    """Fetch senator details, committees, and authored bills from Senate open data."""
-    search_name = name.lower()
-    data = await make_request(f"{SENADO_BASE_URL}/senador/lista/atual") or {}
-    senators = data.get("ListaParlamentarEmExercicio", {}).get("Parlamentares", {}).get("Parlamentar", [])
-    if isinstance(senators, dict):
-        senators = [senators]
+async def _get_senator(senator: dict, include_votes: bool = False, limit: int = 5) -> dict:
+    """Fetch committees and authored bills for a resolved senator."""
+    found = senator["raw"]
+    code = senator["id"]
 
-    found = None
-    for s in senators:
-        info = s.get("IdentificacaoParlamentar", {})
-        full = info.get("NomeCompletoParlamentar", "").lower()
-        parl = info.get("NomeParlamentar", "").lower()
-        if search_name in full or search_name in parl:
-            found = info
-            break
-
-    if not found:
-        return None
-
-    code = found.get("CodigoParlamentar")
-
-    # Fetch active committees
-    comm_data = await make_request(f"{SENADO_BASE_URL}/senador/{code}/comissoes") or {}
-    comm_list = comm_data.get("MembroComissaoParlamentar", {}).get("Parlamentar", {}).get("MembroComissoes", {}).get("Comissao", [])
+    comm_data, aut_data = await asyncio.gather(
+        make_request(f"{SENADO_BASE_URL}/senador/{code}/comissoes"),
+        make_request(f"{SENADO_BASE_URL}/senador/{code}/autorias"),
+    )
+    comm_list = (comm_data or {}).get("MembroComissaoParlamentar", {}).get("Parlamentar", {}).get("MembroComissoes", {}).get("Comissao", [])
     if isinstance(comm_list, dict):
         comm_list = [comm_list]
     comissoes = [
@@ -61,9 +47,7 @@ async def _get_senator(name: str, include_votes: bool = False, limit: int = 5) -
         for c in comm_list[:limit]
     ]
 
-    # Fetch authored proposals
-    aut_data = await make_request(f"{SENADO_BASE_URL}/senador/{code}/autorias") or {}
-    aut_list = aut_data.get("MateriasAutoriaParlamentar", {}).get("Parlamentar", {}).get("Autorias", {}).get("Autoria", [])
+    aut_list = (aut_data or {}).get("MateriasAutoriaParlamentar", {}).get("Parlamentar", {}).get("Autorias", {}).get("Autoria", [])
     if isinstance(aut_list, dict):
         aut_list = [aut_list]
     proposicoes = [
@@ -89,62 +73,48 @@ async def _get_senator(name: str, include_votes: bool = False, limit: int = 5) -
     }
 
     if include_votes:
-        votes_data = await make_request(f"{SENADO_BASE_URL}/senador/{code}/votacoes") or {}
-        votacoes = votes_data.get("VotacaoParlamentar", {}).get("Parlamentar", {}).get("Votacoes", {}).get("Votacao", [])
-        if isinstance(votacoes, dict):
-            votacoes = [votacoes]
-        profile["votacoes"] = [
-            {
-                "materia": f"{v.get('Materia', {}).get('Sigla', '')} {v.get('Materia', {}).get('Numero', '')}/{v.get('Materia', {}).get('Ano', '')}".strip(),
-                "voto": v.get("DescricaoVoto", "").replace(" (Voto Secreto)", "").strip(),
-                "descricao": v.get("DescricaoVotacao"),
-            }
-            for v in votacoes[:limit]
-        ]
+        votes = await _get_senator_votes(senator, limit=limit)
+        profile["votacoes"] = votes.get("votacoes", [])
 
     return profile
 
 
-async def _get_deputy(name: str, include_votes: bool = False, limit: int = 5) -> dict | None:
-    """Fetch deputy details, committees, and authored bills from Chamber of Deputies open data."""
-    encoded_name = urllib.parse.quote(name)
-    search_data = await make_request(f"{CAMARA_BASE_URL}/deputados?nome={encoded_name}") or {}
-    deputados = search_data.get("dados", [])
-    if not deputados:
-        return None
+async def _get_deputy(deputy: dict, include_votes: bool = False, limit: int = 5) -> dict:
+    """Fetch details, committees, and authored bills for a resolved deputy."""
+    dep = deputy["raw"]
+    dep_id = deputy["id"]
 
-    dep = deputados[0]
-    dep_id = dep.get("id")
-
-    detail_data = await make_request(f"{CAMARA_BASE_URL}/deputados/{dep_id}") or {}
-    d = detail_data.get("dados", {})
+    detail_data, orgaos_data, proposicoes_data = await asyncio.gather(
+        make_request(f"{CAMARA_BASE_URL}/deputados/{dep_id}"),
+        make_request(f"{CAMARA_BASE_URL}/deputados/{dep_id}/orgaos"),
+        make_request(f"{CAMARA_BASE_URL}/proposicoes?idDeputadoAutor={dep_id}&itens={limit}"),
+    )
+    d = (detail_data or {}).get("dados", {})
     ultimo = d.get("ultimoStatus", {})
 
-    orgaos_data = await make_request(f"{CAMARA_BASE_URL}/deputados/{dep_id}/orgaos") or {}
     comissoes = [
         {
             "nome": o.get("nomeOrgao"),
             "sigla": o.get("siglaOrgao"),
             "cargo": o.get("titulo"),
         }
-        for o in orgaos_data.get("dados", [])[:limit]
+        for o in (orgaos_data or {}).get("dados", [])[:limit]
     ]
 
-    proposicoes_data = await make_request(f"{CAMARA_BASE_URL}/proposicoes?idDeputadoAutor={dep_id}&itens={limit}") or {}
     proposicoes = [
         {
             "identificacao": f"{p.get('siglaTipo')} {p.get('numero')}/{p.get('ano')}",
             "ementa": p.get("ementa"),
         }
-        for p in proposicoes_data.get("dados", [])
+        for p in (proposicoes_data or {}).get("dados", [])
     ]
 
     profile = {
-        "parlamentar": dep.get("nome"),
+        "parlamentar": deputy["nome"],
         "nome_civil": d.get("nomeCivil"),
         "casa": "Câmara dos Deputados",
-        "partido": ultimo.get("siglaPartido"),
-        "uf": ultimo.get("siglaUf"),
+        "partido": ultimo.get("siglaPartido") or deputy["partido"],
+        "uf": ultimo.get("siglaUf") or deputy["uf"],
         "email": ultimo.get("email") or dep.get("email"),
         "foto": ultimo.get("urlFoto") or dep.get("urlFoto"),
         "situacao": ultimo.get("situacao", "Exercício"),
@@ -154,17 +124,35 @@ async def _get_deputy(name: str, include_votes: bool = False, limit: int = 5) ->
     }
 
     if include_votes:
-        profile["votacoes"] = []
+        votes = await _get_deputy_votes(deputy, limit=limit)
+        profile["votacoes"] = votes.get("votacoes", [])
 
     return profile
 
 
+async def get_profile(
+    name: str | None = None,
+    house: str = "auto",
+    include_votes: bool = False,
+    limit: int = 5,
+    parliamentarian_id: int | None = None,
+) -> dict:
+    """Resolve the parliamentarian unambiguously, then build the unified profile."""
+    parl = await resolve_parliamentarian(name, house=house, parliamentarian_id=parliamentarian_id)
+    if "error" in parl:
+        return parl
+    if parl["casa"] == "senado":
+        return await _get_senator(parl, include_votes=include_votes, limit=limit)
+    return await _get_deputy(parl, include_votes=include_votes, limit=limit)
+
+
 @mcp.tool()
 async def getParliamentarianProfile(
-    name: str,
+    name: str = "",
     house: str = "auto",
     includeVotes: bool = False,
     limit: int = 5,
+    parliamentarianId: int | None = None,
 ) -> str:
     """
     Get the unified profile of a Brazilian parliamentarian (Senator or Federal Deputy).
@@ -177,23 +165,11 @@ async def getParliamentarianProfile(
         house: Legislative house to search. Options: 'auto' (searches both), 'senado' (Senate), or 'camara' (Chamber of Deputies). Default: 'auto'.
         includeVotes: Whether to include nominal voting history (default: False).
         limit: Maximum number of committees and authored proposals to return (default: 5).
+        parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
     """
-    profile = None
-    target_house = house.lower()
-
-    if target_house in ("auto", "senado"):
-        profile = await _get_senator(name, include_votes=includeVotes, limit=limit)
-
-    if not profile and target_house in ("auto", "camara"):
-        profile = await _get_deputy(name, include_votes=includeVotes, limit=limit)
-
-    if not profile:
-        return json.dumps(
-            {"error": f"Parliamentarian '{name}' not found in {house}."},
-            ensure_ascii=False,
-            indent=2,
-        )
-
+    profile = await get_profile(
+        name, house=house, include_votes=includeVotes, limit=limit, parliamentarian_id=parliamentarianId
+    )
     return json.dumps(profile, ensure_ascii=False, indent=2)
 
 
@@ -262,11 +238,12 @@ async def getBillText(number: str, year: str) -> str:
 
 @mcp.tool()
 async def getParliamentarianExpenses(
-    name: str,
+    name: str = "",
     house: str = "auto",
     year: int | None = None,
     month: int | None = None,
     limit: int = 15,
+    parliamentarianId: int | None = None,
 ) -> str:
     """
     Get itemized and aggregated CEAP expenses for a Brazilian parliamentarian.
@@ -277,21 +254,27 @@ async def getParliamentarianExpenses(
         year: Reference calendar year (e.g., 2024). Defaults to the latest available year.
         month: Reference month (1 to 12).
         limit: Maximum number of itemized expense receipts to return (default: 15).
+        parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
     """
-    result = await get_parliamentarian_expenses(name, house=house, year=year, month=month, limit=limit)
+    result = await get_parliamentarian_expenses(
+        name, house=house, year=year, month=month, limit=limit, parliamentarian_id=parliamentarianId
+    )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
 async def getParliamentarianActivity(
-    name: str,
+    name: str = "",
     house: str = "auto",
     startDate: str | None = None,
     endDate: str | None = None,
     limit: int = 20,
+    parliamentarianId: int | None = None,
 ) -> str:
     """
-    Get parliamentary attendance, plenary sessions, committee hearings, or speeches.
+    Get parliamentary events (Chamber) or floor speeches and committees (Senate).
+
+    Defaults to the current calendar year when no dates are given.
 
     Args:
         name: Name of the parliamentarian.
@@ -299,38 +282,48 @@ async def getParliamentarianActivity(
         startDate: Filter starting date in YYYY-MM-DD format.
         endDate: Filter ending date in YYYY-MM-DD format.
         limit: Maximum number of events or speeches to return (default: 20).
+        parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
     """
     result = await get_parliamentarian_activity(
-        name, house=house, start_date=startDate, end_date=endDate, limit=limit
+        name, house=house, start_date=startDate, end_date=endDate, limit=limit,
+        parliamentarian_id=parliamentarianId,
     )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
 async def getParliamentarianVotes(
-    name: str,
+    name: str = "",
     house: str = "auto",
     limit: int = 15,
     year: int | None = None,
+    parliamentarianId: int | None = None,
 ) -> str:
     """
     Get nominal roll-call voting records and positions for a Brazilian parliamentarian.
+
+    Built from the complete yearly records, it also reports plenary participation: roll calls
+    held vs. votes cast and, for the Senate, justified vs. unjustified absences.
 
     Args:
         name: Name of the parliamentarian.
         house: Legislative house to search. Options: 'auto', 'senado', or 'camara'. Default: 'auto'.
         limit: Maximum number of voting records to return (default: 15).
         year: Year filter for voting records.
+        parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
     """
-    result = await get_parliamentarian_votes(name, house=house, limit=limit, year=year)
+    result = await get_parliamentarian_votes(
+        name, house=house, limit=limit, year=year, parliamentarian_id=parliamentarianId
+    )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
 async def evaluateParliamentarian(
-    name: str,
+    name: str = "",
     house: str = "auto",
     year: int | None = None,
+    parliamentarianId: int | None = None,
 ) -> str:
     """
     Consolidate biographical data, CEAP expenses, institutional activity, and voting records into a qualitative evaluation.
@@ -339,8 +332,9 @@ async def evaluateParliamentarian(
         name: Name of the parliamentarian.
         house: Legislative house to search. Options: 'auto', 'senado', or 'camara'. Default: 'auto'.
         year: Reference year for expenditure and activity analysis.
+        parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
     """
-    result = await evaluate_parliamentarian(name, house=house, year=year)
+    result = await evaluate_parliamentarian(name, house=house, year=year, parliamentarian_id=parliamentarianId)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 

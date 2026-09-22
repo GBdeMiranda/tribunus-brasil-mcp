@@ -96,14 +96,27 @@ def _generate_qualitative_assessment(
 
     # Assess institutional activity & voting
     dist_votos = votes.get("distribuicao_votos", {})
-    total_votos = votes.get("total_votacoes_encontradas", 0)
-    if total_votos > 0:
+    participacao = votes.get("participacao_plenario") or {}
+    total_plen = participacao.get("votacoes_nominais") or 0
+    if total_plen:
         voto_resumo = ", ".join([f"{pos}: {cnt}" for pos, cnt in dist_votos.items()])
         atuacao_votos = (
-            f"Registrou participação em {total_votos} votações nominais examinadas. Distribuição: {voto_resumo}."
+            f"Em {votes.get('ano_referencia')}, votou em {participacao.get('votou', 0)} de {total_plen} "
+            f"votações nominais do Plenário ({participacao.get('taxa_participacao', 0):.1%}). "
+            f"Distribuição dos votos registrados: {voto_resumo}."
+        )
+        if "ausencia_nao_justificada" in participacao:
+            atuacao_votos += (
+                f" Ausências justificadas: {participacao.get('ausencia_justificada', 0)}; "
+                f"não justificadas: {participacao.get('ausencia_nao_justificada', 0)}."
+            )
+    elif votes.get("total_votacoes_encontradas"):
+        voto_resumo = ", ".join([f"{pos}: {cnt}" for pos, cnt in dist_votos.items()])
+        atuacao_votos = (
+            f"Registrou {votes['total_votacoes_encontradas']} votos nominais. Distribuição: {voto_resumo}."
         )
     else:
-        atuacao_votos = "Sem registros detalhados de votações nominais no intervalo amostrado."
+        atuacao_votos = "Sem registros de votações nominais no período consultado."
 
     return {
         "foco_tematico": foco_legislativo,
@@ -115,44 +128,44 @@ def _generate_qualitative_assessment(
 
 
 async def evaluate_parliamentarian(
-    name: str,
+    name: str | None = None,
     house: str = "auto",
     year: int | None = None,
     profile_getter: Any = None,
+    parliamentarian_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Consolidates profile, expenditures, attendance, and roll-call votes into a qualitative evaluation dossier.
     """
-    # 1. Fetch Profile
+    # 1. Resolve once and fetch the profile; everything below is keyed by the official id,
+    # so a homonym can never leak into the expenses or votes of the dossier.
     if profile_getter:
         profile_res = await profile_getter(name, house=house, includeVotes=True, limit=10)
     else:
-        from .mcp_server import _get_senator, _get_deputy
-        target_house = house.lower()
-        profile_res = None
-        if target_house in ("auto", "senado"):
-            profile_res = await _get_senator(name, include_votes=True, limit=10)
-        if not profile_res and target_house in ("auto", "camara"):
-            profile_res = await _get_deputy(name, include_votes=True, limit=10)
+        from .mcp_server import get_profile
+        profile_res = await get_profile(
+            name, house=house, include_votes=False, limit=10, parliamentarian_id=parliamentarian_id
+        )
 
     if not profile_res or "error" in profile_res:
-        return {"error": f"Parliamentarian '{name}' not found for evaluation."}
+        return profile_res or {"error": f"Parliamentarian '{name}' not found for evaluation."}
 
     detected_house = "senado" if profile_res.get("casa") == "Senado Federal" else "camara"
+    parl_id = profile_res.get("codigo") or parliamentarian_id
+    start_date, end_date = (f"{year}-01-01", f"{year}-12-31") if year else (None, None)
 
     # 2. Concurrently fetch Expenses, Activity, and Votes
-    expenses_task = asyncio.create_task(
-        get_parliamentarian_expenses(name, house=detected_house, year=year, limit=10)
-    )
-    activity_task = asyncio.create_task(
-        get_parliamentarian_activity(name, house=detected_house, limit=15)
-    )
-    votes_task = asyncio.create_task(
-        get_parliamentarian_votes(name, house=detected_house, limit=15, year=year)
-    )
-
     expenses_res, activity_res, votes_res = await asyncio.gather(
-        expenses_task, activity_task, votes_task
+        get_parliamentarian_expenses(
+            name, house=detected_house, year=year, limit=10, parliamentarian_id=parl_id
+        ),
+        get_parliamentarian_activity(
+            name, house=detected_house, start_date=start_date, end_date=end_date, limit=15,
+            parliamentarian_id=parl_id,
+        ),
+        get_parliamentarian_votes(
+            name, house=detected_house, limit=15, year=year, parliamentarian_id=parl_id
+        ),
     )
 
     # 3. Extract Themes
@@ -172,6 +185,7 @@ async def evaluate_parliamentarian(
 
     return {
         "parlamentar": profile_res.get("parlamentar"),
+        "id": parl_id,
         "nome_civil": profile_res.get("nome_civil"),
         "casa": profile_res.get("casa"),
         "partido": profile_res.get("partido"),
@@ -182,8 +196,10 @@ async def evaluate_parliamentarian(
         "resumo_despesas": {
             "ano_referencia": expenses_res.get("ano_referencia"),
             "total_despesas": expenses_res.get("total_despesas", 0.0),
+            "quantidade_despesas": expenses_res.get("quantidade_despesas", 0),
             "gastos_por_categoria": expenses_res.get("gastos_por_categoria", {}),
             "principais_fornecedores": expenses_res.get("principais_fornecedores", []),
+            "despesas_sem_comprovante_digital": expenses_res.get("despesas_sem_comprovante_digital"),
         },
         "resumo_atividade": {
             "total_eventos_ou_discursos": activity_res.get("total_eventos")
@@ -192,8 +208,16 @@ async def evaluate_parliamentarian(
             "proposicoes_autoria": len(profile_res.get("proposicoes_autoria", [])),
         },
         "resumo_votacoes": {
+            "ano_referencia": votes_res.get("ano_referencia"),
             "total_votacoes": votes_res.get("total_votacoes_encontradas", 0),
             "distribuicao_votos": votes_res.get("distribuicao_votos", {}),
+            "participacao_plenario": votes_res.get("participacao_plenario"),
         },
         "avaliacao_qualitativa": qualitative,
+        # Provenance of every figure above, so any claim in the evaluation can be audited.
+        "metadados": {
+            "despesas": expenses_res.get("metadados") or {"erro": expenses_res.get("error")},
+            "atividade": activity_res.get("metadados") or {"erro": activity_res.get("error")},
+            "votacoes": votes_res.get("metadados") or {"erro": votes_res.get("error")},
+        },
     }

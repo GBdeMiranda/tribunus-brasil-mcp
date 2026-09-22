@@ -1,6 +1,13 @@
+import csv
+import datetime
 import io
+import os
 import sys
-from typing import Any
+import time
+import unicodedata
+import zipfile
+from pathlib import Path
+from typing import Any, Iterator
 import httpx
 import pymupdf
 
@@ -8,6 +15,16 @@ DEFAULT_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "mcp-brl-congress/0.1.0",
 }
+
+CACHE_DIR = Path(
+    os.environ.get("TRIBUNUS_CACHE_DIR")
+    or Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "tribunus-brasil-mcp"
+)
+
+# Bulk files for the current year are republished daily; past years change rarely
+# (late reimbursements), so they are refreshed monthly.
+CURRENT_YEAR_MAX_AGE = 24 * 3600
+PAST_YEAR_MAX_AGE = 30 * 24 * 3600
 
 
 async def make_request(url: str, params: dict[str, Any] | None = None) -> Any | None:
@@ -22,6 +39,92 @@ async def make_request(url: str, params: dict[str, Any] | None = None) -> Any | 
         except Exception as e:
             print(f"Error fetching JSON from {url}: {e}", file=sys.stderr)
             return None
+
+
+async def fetch_all_pages(
+    url: str,
+    params: dict[str, Any] | None = None,
+    max_pages: int = 50,
+) -> tuple[list[Any], bool]:
+    """
+    Follow the Câmara API 'next' links until exhausted.
+
+    Returns (records, complete). `complete` is False when a page failed or `max_pages`
+    was reached, so callers can report partial coverage instead of silently undercounting.
+    """
+    page_params = dict(params or {})
+    page_params.setdefault("itens", 100)
+    records: list[Any] = []
+
+    for page in range(1, max_pages + 1):
+        page_params["pagina"] = page
+        data = await make_request(url, params=page_params)
+        if data is None:
+            return records, False
+        records.extend(data.get("dados", []))
+        links = data.get("links", [])
+        if not any(link.get("rel") == "next" for link in links):
+            return records, True
+
+    return records, False
+
+
+def cache_max_age(year: int) -> int:
+    return CURRENT_YEAR_MAX_AGE if year >= datetime.date.today().year else PAST_YEAR_MAX_AGE
+
+
+async def fetch_cached_file(url: str, filename: str, max_age: int) -> Path | None:
+    """
+    Download a bulk open-data file into the local cache, reusing it while fresh.
+
+    A stale copy is still returned if the refresh fails, since slightly outdated data is
+    preferable to none; callers learn the file age through `cached_file_age`.
+    """
+    path = CACHE_DIR / filename
+    if path.exists() and time.time() - path.stat().st_mtime < max_age:
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".part")
+    try:
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "GET", url, headers={"User-Agent": DEFAULT_HEADERS["User-Agent"]},
+                timeout=300.0, follow_redirects=True,
+            ) as response:
+                response.raise_for_status()
+                with open(tmp_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        f.write(chunk)
+        tmp_path.replace(path)
+        return path
+    except Exception as e:
+        print(f"Error downloading bulk file from {url}: {e}", file=sys.stderr)
+        tmp_path.unlink(missing_ok=True)
+        return path if path.exists() else None
+
+
+def cached_file_age_hours(path: Path) -> float:
+    return round((time.time() - path.stat().st_mtime) / 3600, 1)
+
+
+def iter_csv_rows(path: Path) -> Iterator[dict[str, str]]:
+    """Stream rows from a ';'-separated CSV, optionally inside a single-member zip."""
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as zf:
+            member = zf.namelist()[0]
+            with zf.open(member) as raw:
+                text = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+                yield from csv.DictReader(text, delimiter=";")
+    else:
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            yield from csv.DictReader(f, delimiter=";")
+
+
+def normalize_name(name: str) -> str:
+    """Lowercase and strip accents so 'Átila' and 'atila' compare equal."""
+    decomposed = unicodedata.normalize("NFKD", name or "")
+    return " ".join("".join(c for c in decomposed if not unicodedata.combining(c)).lower().split())
 
 
 async def fetch_document_content(url: str) -> bytes | None:
