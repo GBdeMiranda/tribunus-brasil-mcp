@@ -9,7 +9,7 @@ from .activity import get_parliamentarian_activity, get_parliamentarian_votes
 from .evaluation import evaluate_parliamentarian
 from .themes import search_congressional_themes
 
-mcp = FastMCP("senate")
+mcp = FastMCP("tribunus-brasil-mcp")
 
 SENADO_BASE_URL = "https://legis.senado.leg.br/dadosabertos"
 CAMARA_BASE_URL = "https://dadosabertos.camara.leg.br/api/v2"

@@ -1,9 +1,11 @@
 [project]
-name = "radar_parlamentar_mcp"
+name = "tribunus-brasil-mcp"
 version = "0.1.0"
-description = "MCP Server for Brazilian National Congress"
+description = "Tribunus Brasil MCP - Civic scrutiny and diagnostic server for the Brazilian National Congress"
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = ["mcp", "brazil", "congress", "senate", "chamber-of-deputies", "transparency", "llm", "tribunus"]
+license = { text = "MIT" }
 dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.13.1,<2",
@@ -15,4 +17,5 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-radar_parlamentar_mcp = "radar_parlamentar_mcp.mcp_server:main"
+tribunus-brasil-mcp = "tribunus_brasil_mcp.mcp_server:main"
+tribunus_brasil_mcp = "tribunus_brasil_mcp.mcp_server:main"

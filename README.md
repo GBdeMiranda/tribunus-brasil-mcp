@@ -1,15 +1,31 @@
-# Brazilian Congress MCP Server
+# Tribunus Brasil MCP
 
-An MCP (Model Context Protocol) server that provides access to Brazilian Parliament legislative data, enabling the retrieval, search, and analysis of Senate bills, senator profiles, and legislative documents.
+> *In the tradition of the Roman Tribunus Plebis, auditing and scrutinizing public representatives in defense of the public interest.*
 
-## Installation
+**Tribunus Brasil MCP** is an open-source [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects Large Language Models directly to open data from the Brazilian National Congress (Federal Senate and Chamber of Deputies).
 
-### Prerequisites
+Beyond standard API data retrieval, it equips LLMs with structured transparency audits (CEAP expenditures, voting histories, institutional attendance) and qualitative evaluation rubrics (**Matriz de Postura Parlamentar - MPP**) across geopolitical, economic, democratic, and socio-environmental dimensions.
 
-- Python 3.10+
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
+---
 
-### Setup
+## Quickstart
+
+### Using `uvx` (Recommended for Claude Desktop, Cursor, Zed, Antigravity)
+
+Add the following to your MCP client configuration (e.g. `claude_desktop_config.json` or `mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "tribunus-brasil": {
+      "command": "uvx",
+      "args": ["tribunus-brasil-mcp"]
+    }
+  }
+}
+```
+
+### Local Development / Installation from Source
 
 1. **Clone the repository**:
    ```bash
@@ -17,42 +33,35 @@ An MCP (Model Context Protocol) server that provides access to Brazilian Parliam
    cd mcp_brl_congress
    ```
 
-2. **Install the MCP tool**:
+2. **Install dependencies and editable package**:
    ```bash
-   uv tool install -e .
-   # or with pip
    pip install -e .
    ```
 
-3. **Configure in your MCP Client**:
-   Add to your MCP client configuration (e.g., Claude Desktop, Cursor):
-   ```json
-   {
-     "mcpServers": {
-       "mcp_brl_congress": {
-         "command": "mcp_brl_congress"
-       }
-     }
-   }
+3. **Run the server manually**:
+   ```bash
+   tribunus-brasil-mcp
    ```
+
+---
 
 ## Available Tools
 
-The server registers the following MCP tools (all returning structured JSON):
+All tools return structured, LLM-optimized JSON:
 
 1. **`getParliamentarianProfile(name, house, includeVotes, limit)`**:
    - Retrieves the unified bicameral profile of any Brazilian parliamentarian (Senator or Federal Deputy).
-   - Consolidates civil name, parliamentary name, house (`Senado Federal` or `Câmara dos Deputados`), party, state (UF), email, photo, active committee assignments, and authored legislative proposals into a standardized JSON response.
+   - Consolidates civil name, parliamentary name, house (`Senado Federal` or `Câmara dos Deputados`), party, state (UF), email, photo, active committee assignments, and authored legislative proposals.
    - `house`: `'auto'` (default), `'senado'`, or `'camara'`.
 
-2. **`searchBills(keyword, year, limit)`**:
-   - Searches for legislative proposals in the Brazilian Senate using keywords and year filters.
+2. **`searchLegislativeProposals(keyword, year, limit)`**:
+   - Searches for specific legislative proposals and bills (e.g., `PL 2630/2020`) using keywords and optional year filters.
 
 3. **`getBillText(number, year)`**:
-   - Retrieves the metadata, status, primary document URL, and extracted text of a legislative bill (e.g., number `"2630"`, year `"2020"`). Automatically prioritizes the primary bill proposition and caps text size safely to avoid context overflow.
+   - Retrieves metadata, current status, primary document URL, and extracted textual content from bills (with automatic PDF text extraction).
 
 4. **`getParliamentarianExpenses(name, house, year, month, limit)`**:
-   - Retrieves itemized and aggregated CEAP (parliamentary quota) expenditures.
+   - Retrieves itemized and aggregated CEAP (*Cota para o Exercício da Atividade Parlamentar*) expenditures.
    - Calculates total spending, categorical breakdown (airfare, housing, publicity, advisory), and top supplier receipts.
 
 5. **`getParliamentarianActivity(name, house, startDate, endDate, limit)`**:
@@ -62,22 +71,18 @@ The server registers the following MCP tools (all returning structured JSON):
    - Retrieves nominal roll-call voting records, detailing bill subjects and the legislator's specific vote positions (`Sim`, `Não`, `Abstenção`, `Obstrução`).
 
 7. **`evaluateParliamentarian(name, house, year)`**:
-   - Consolidates biographical data, CEAP expenses, committee assignments, authored proposals, institutional attendance, and roll-call votes into an objective qualitative evaluation dossier.
+   - Consolidates biographical data, CEAP expenses, committee assignments, authored proposals, attendance, and roll-call votes alongside the qualitative **Matriz de Postura Parlamentar (MPP)** guidelines.
 
 8. **`searchCongressionalThemes(theme, house, limit, year)`**:
-   - Synthesizes congressional activity surrounding a public policy topic into a consolidated bicameral overview.
-   - Aggregates relevant bills, floor speeches, public hearings, committee deliberations, and recent roll-call votes alongside an executive summary.
+   - Synthesizes congressional activity surrounding a public policy topic (e.g. "inteligência artificial", "reforma tributária", "transição energética") into a consolidated bicameral overview.
 
-## API Details
+---
+
+## Data Sources
 
 - **Federal Senate**: `https://legis.senado.leg.br/dadosabertos`
 - **Chamber of Deputies**: `https://dadosabertos.camara.leg.br/api/v2`
-- **Data Format**: JSON with extracted document content
-- **Document Processing**: PDF text extraction using PyMuPDF
 
-## Dependencies
+## License
 
-- **mcp[cli]**: Model Context Protocol implementation
-- **httpx**: Async HTTP client for API requests
-- **PyMuPDF**: PDF text extraction
-- **Python 3.10+**: Supported runtime
+MIT License.
