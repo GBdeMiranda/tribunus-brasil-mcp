@@ -9,7 +9,7 @@ are reported back with the candidate list instead of silently picking the first 
 import asyncio
 import urllib.parse
 from typing import Any
-from .utils import make_request, normalize_name
+from .utils import fetch_all_pages, make_request, normalize_name
 
 SENADO_BASE_URL = "https://legis.senado.leg.br/dadosabertos"
 CAMARA_BASE_URL = "https://dadosabertos.camara.leg.br/api/v2"
@@ -41,20 +41,20 @@ def _deputy_candidate(dep: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _senator_candidates_by_name(name: str) -> list[dict[str, Any]]:
-    query = normalize_name(name)
+async def _senators_in_office() -> list[dict[str, Any]]:
     data = await make_request(f"{SENADO_BASE_URL}/senador/lista/atual") or {}
     senators = data.get("ListaParlamentarEmExercicio", {}).get("Parlamentares", {}).get("Parlamentar", [])
     if isinstance(senators, dict):
         senators = [senators]
+    return [_senator_candidate(s["IdentificacaoParlamentar"]) for s in senators if s.get("IdentificacaoParlamentar")]
 
-    candidates = []
-    for s in senators:
-        info = s.get("IdentificacaoParlamentar", {})
-        names = (normalize_name(info.get("NomeParlamentar", "")), normalize_name(info.get("NomeCompletoParlamentar", "")))
-        if any(query in n for n in names):
-            candidates.append(_senator_candidate(info))
-    return candidates
+
+async def _senator_candidates_by_name(name: str) -> list[dict[str, Any]]:
+    query = normalize_name(name)
+    return [
+        c for c in await _senators_in_office()
+        if any(query in normalize_name(n or "") for n in (c["nome"], c["nome_civil"]))
+    ]
 
 
 async def _deputy_candidates_by_name(name: str) -> list[dict[str, Any]]:
@@ -159,3 +159,22 @@ async def resolve_parliamentarian(
         ),
         "candidatos": [_public(c) for c in candidates],
     }
+
+
+async def list_in_office(house: str = "auto") -> list[dict[str, Any]]:
+    """
+    Every parliamentarian currently in office, in the shape `resolve_parliamentarian` returns.
+
+    The Câmara list carries no civil name (`nome_civil` is None); resolve a deputy by id when
+    it is needed, e.g. to match amendment authors. A house whose list could not be fetched in
+    full is left out rather than returned partially.
+    """
+    target_house = (house or "auto").lower()
+    result: list[dict[str, Any]] = []
+    if target_house in ("auto", "senado"):
+        result += await _senators_in_office()
+    if target_house in ("auto", "camara"):
+        deputies, complete = await fetch_all_pages(f"{CAMARA_BASE_URL}/deputados", params={"ordem": "ASC", "ordenarPor": "nome"})
+        if complete:
+            result += [_deputy_candidate(d) for d in deputies if d.get("id")]
+    return result

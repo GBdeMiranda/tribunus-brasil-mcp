@@ -118,6 +118,22 @@ Each tool queries the official open-data services (live APIs and yearly bulk fil
 - Parliamentarian tools accept `name` or `parliamentarianId` (Senate `CodigoParlamentar` or Chamber deputy id). A name shared by more than one parliamentarian (e.g. `"Lira"`: Arthur Lira, Átila Lira) returns the list of `candidatos`, to retry with the id.
 - Every result carries a `metadados` block (source URL, period, record count, completeness, limitations), so each figure can be checked at its source.
 
+### Use as a library
+
+The same collection and classification can be imported from Python, without the MCP protocol and without the summarizing done for LLMs:
+
+```python
+from tribunus_brasil_mcp.identity import list_in_office, resolve_parliamentarian
+from tribunus_brasil_mcp.votes import vote_records, positioning_by_government
+from tribunus_brasil_mcp.publicity import audit_publicity
+from tribunus_brasil_mcp.evaluation import public_fund
+from tribunus_brasil_mcp.routine import weekly_routine    # days in Brasília per week
+from tribunus_brasil_mcp.staff import office_staff        # people in the office
+
+parl = await resolve_parliamentarian(house="camara", parliamentarian_id=204554)
+records = await vote_records(parl, [2023, 2024, 2025])  # every merit roll call, with axes
+```
+
 ---
 
 ## Data Sources

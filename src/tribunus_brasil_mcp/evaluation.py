@@ -215,7 +215,8 @@ async def _birthplace(parl: dict[str, Any]) -> str | None:
     return f"{city}/{uf}" if city else None
 
 
-async def _public_fund(parl: dict[str, Any], years: list[int]) -> dict[str, Any]:
+async def public_fund(parl: dict[str, Any], years: list[int]) -> dict[str, Any]:
+    """Individual amendments of `years`: area (função), recipients and territorial concentration."""
     data = await get_amendments([parl["nome"], parl.get("nome_civil")], years)
     if not data.get("localizado"):
         return {
@@ -428,7 +429,7 @@ async def evaluate_parliamentarian(
         _birthplace(parl),
         votes_by_axis(parl, vote_years),
         _social_base(parl, today),
-        _public_fund(parl, fund_years),
+        public_fund(parl, fund_years),
         _publicity(parl, publicity_year),
         _agenda_and_discourse(parl, start, today),
     )

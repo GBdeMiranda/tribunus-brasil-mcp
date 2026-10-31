@@ -431,7 +431,7 @@ def _salience(item: dict[str, Any]) -> tuple:
     return (not (contested or dissent or absent), item["resultado"]["maioria"] or 1.0, item["data"])
 
 
-def _positioning(records: list[dict[str, Any]]) -> dict[str, Any]:
+def positioning_by_government(records: list[dict[str, Any]]) -> dict[str, Any]:
     """How the parliamentarian positions relative to government, party and the house, per government."""
     periods: dict[str, dict[str, int]] = collections.defaultdict(lambda: collections.defaultdict(int))
     for r in records:
@@ -463,8 +463,15 @@ def _positioning(records: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+async def vote_records(parl: dict[str, Any], years: list[int]) -> list[dict[str, Any]]:
+    """Every plenary merit roll call of `years` while in office, one record per vote, unabridged."""
+    if parl["casa"] == "camara":
+        return await _camara_records(parl["id"], years)
+    return await _senado_records(parl["id"], years)
+
+
 async def votes_by_axis(parl: dict[str, Any], years: list[int]) -> dict[str, Any]:
-    records = await (_camara_records(parl["id"], years) if parl["casa"] == "camara" else _senado_records(parl["id"], years))
+    records = await vote_records(parl, years)
 
     by_bill: dict[Any, list[dict[str, Any]]] = collections.defaultdict(list)
     for r in records:
@@ -500,7 +507,7 @@ async def votes_by_axis(parl: dict[str, Any], years: list[int]) -> dict[str, Any
             "destaques": [it["materia"] for it in unclassified[:ITEMS_PER_AXIS]],
         },
         "materias": catalog,
-        "posicionamento_por_governo": _positioning(records),
+        "posicionamento_por_governo": positioning_by_government(records),
         "ausencias_em_votacoes_disputadas": [
             {"materia": r["materia"], "data": r["data"], "votacao": r["descricao"][:120], "resultado": r["resultado"]}
             for r in records

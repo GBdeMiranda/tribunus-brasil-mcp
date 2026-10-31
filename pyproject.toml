@@ -1,6 +1,6 @@
 [project]
 name = "tribunus-brasil-mcp"
-version = "0.2.1"
+version = "0.3.0"
 description = "Tribunus Brasil MCP - Civic scrutiny and diagnostic server for the Brazilian National Congress"
 readme = "README.md"
 requires-python = ">=3.10"

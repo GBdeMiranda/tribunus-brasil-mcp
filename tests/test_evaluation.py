@@ -11,7 +11,7 @@ from tribunus_brasil_mcp import evaluation
 from tribunus_brasil_mcp.evaluation import (
     _is_local_government,
     _legislature_start,
-    _public_fund,
+    public_fund,
     classify_front,
     evaluate_parliamentarian,
 )
@@ -84,7 +84,7 @@ class TestPublicFund(unittest.TestCase):
             "metadados": {"fonte": "x"},
         }
         with patch.object(evaluation, "get_amendments", AsyncMock(return_value=amendments)):
-            res = asyncio.run(_public_fund(DEPUTY, [2025]))
+            res = asyncio.run(public_fund(DEPUTY, [2025]))
 
         territory = res["concentracao_territorial"]
         self.assertEqual(territory["recebido_por_estados_e_municipios"], 1000.0)
@@ -100,7 +100,7 @@ class TestEvaluateParliamentarian(unittest.TestCase):
              patch.object(evaluation, "_birthplace", AsyncMock(return_value="Nova Friburgo/RJ")), \
              patch.object(evaluation, "votes_by_axis", AsyncMock(return_value={"periodo": "2023-2026", "por_eixo": {}})), \
              patch.object(evaluation, "_social_base", AsyncMock(return_value={"comissoes_atuais": []})), \
-             patch.object(evaluation, "_public_fund", AsyncMock(return_value={"localizado": False})), \
+             patch.object(evaluation, "public_fund", AsyncMock(return_value={"localizado": False})), \
              patch.object(evaluation, "_publicity", AsyncMock(return_value={"ano_referencia": 2025})), \
              patch.object(evaluation, "_agenda_and_discourse", AsyncMock(return_value={"proposicoes": {}, "discursos": {}})):
             res = asyncio.run(evaluate_parliamentarian("Glauber Braga", house="camara", year=2025))

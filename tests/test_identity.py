@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from tribunus_brasil_mcp.identity import resolve_parliamentarian
+from tribunus_brasil_mcp.identity import list_in_office, resolve_parliamentarian
 from tribunus_brasil_mcp.utils import normalize_name
 
 SENATORS = {
@@ -76,6 +76,28 @@ class TestIdentity(unittest.TestCase):
         res = resolve(parliamentarian_id=160541, house="camara")
         self.assertEqual(res["nome"], "Arthur Lira")
         self.assertEqual(res["nome_civil"], "ARTHUR CÉSAR PEREIRA DE LIRA")
+
+    def test_list_in_office(self):
+        async def fake_pages(url, params=None, max_pages=50):
+            return DEPUTIES_LIRA["dados"], True
+
+        with patch("tribunus_brasil_mcp.identity.make_request", side_effect=fake_make_request), \
+             patch("tribunus_brasil_mcp.identity.fetch_all_pages", side_effect=fake_pages):
+            everyone = asyncio.run(list_in_office())
+            deputies = asyncio.run(list_in_office("camara"))
+        self.assertEqual([p["casa"] for p in everyone], ["senado", "senado", "camara", "camara"])
+        self.assertEqual(everyone[0]["nome_civil"], "Carlos Eduardo de Souza Braga")
+        self.assertEqual({p["id"] for p in deputies}, {160541, 123086})
+        self.assertIsNone(deputies[0]["nome_civil"])
+
+    def test_list_in_office_drops_incomplete_house(self):
+        async def failed_pages(url, params=None, max_pages=50):
+            return DEPUTIES_LIRA["dados"][:1], False
+
+        with patch("tribunus_brasil_mcp.identity.make_request", side_effect=fake_make_request), \
+             patch("tribunus_brasil_mcp.identity.fetch_all_pages", side_effect=failed_pages):
+            everyone = asyncio.run(list_in_office())
+        self.assertEqual({p["casa"] for p in everyone}, {"senado"})
 
     def test_not_found_and_invalid_house(self):
         self.assertIn("not found", resolve("Fulano", house="camara")["error"])
