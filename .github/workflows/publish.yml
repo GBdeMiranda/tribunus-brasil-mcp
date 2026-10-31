@@ -1,16 +1,51 @@
 name: Publish to PyPI
 
+# Runs when a push to main changes pyproject.toml. If its version has no vX.Y.Z tag yet,
+# builds the package, publishes it to PyPI and creates the tag and the GitHub release.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - .github/workflows/publish.yml
   workflow_dispatch:
 
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
-  build-n-publish:
-    name: Build and publish Python distribution to PyPI
+  version:
+    name: Check for an unreleased version
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # Mandatory for PyPI Trusted Publishing (OIDC)
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      unreleased: ${{ steps.check.outputs.unreleased }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Compare the pyproject.toml version with the repository tags
+      id: check
+      run: |
+        version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+          echo "unreleased=false" >> "$GITHUB_OUTPUT"
+          echo "v$version is already released." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "unreleased=true" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+  build:
+    name: Build sdist and wheel
+    needs: version
+    if: needs.version.outputs.unreleased == 'true'
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
@@ -28,5 +63,37 @@ jobs:
     - name: Build sdist and wheel
       run: python -m build
 
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+  publish:
+    name: Publish to PyPI and create the GitHub release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Mandatory for PyPI Trusted Publishing (OIDC)
+      contents: write  # Create the tag and the GitHub release
+
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
     - name: Publish package distributions to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        skip-existing: true  # lets a re-run go on to the release step after an upload that already happened
+
+    - name: Create tag and GitHub release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: v${{ needs.version.outputs.version }}
+      run: |
+        gh release create "$TAG" dist/* \
+          --repo "$GITHUB_REPOSITORY" \
+          --target "$GITHUB_SHA" \
+          --title "$TAG" \
+          --generate-notes

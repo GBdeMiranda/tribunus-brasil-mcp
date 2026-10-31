@@ -10,6 +10,8 @@ from .utils import (
     fetch_all_pages,
     fetch_cached_file,
     iter_csv_rows,
+    normalize_name,
+    parse_brl_number,
 )
 
 CAMARA_BASE_URL = "https://dadosabertos.camara.leg.br/api/v2"
@@ -17,24 +19,31 @@ CAMARA_CEAP_BULK_URL = "https://www.camara.leg.br/cotas/Ano-{year}.csv.zip"
 SENADO_ADM_BASE_URL = "https://adm.senado.gov.br/adm-dadosabertos/api/v1"
 SENADO_CEAPS_URL = SENADO_ADM_BASE_URL + "/senadores/despesas_ceaps/{year}"
 
+# A category counts as "receipt never published by the institution" when at least this
+# share of the whole house's receipts in it lack a document link. In 2025 telephony,
+# SIGEPA/RPA air tickets and housing-aid top-ups were 100% without a link for every deputy:
+# billed centrally by the Chamber, so their absence says nothing about any single deputy.
+INSTITUTIONAL_NO_RECEIPT_SHARE = 0.99
+
 # Parsed per-deputy rows keyed by (year, deputy id, file mtime), so repeated calls within
 # one evaluation don't re-scan the ~70 MB yearly CSV.
 _ceap_rows_cache: dict[tuple[int, int, float], list[dict[str, str]]] = {}
+_camara_house_stats_cache: dict[tuple[int, float], dict[str, Any]] = {}
+_senado_house_stats_cache: dict[tuple[int, float], dict[str, Any]] = {}
+
+_normalize_float = parse_brl_number
 
 
-def _normalize_float(val: Any) -> float:
-    if val is None:
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    try:
-        clean = str(val).replace(".", "").replace(",", ".") if "," in str(val) else str(val)
-        return float(clean)
-    except (ValueError, TypeError):
-        return 0.0
+def is_self_promotion_category(category: str) -> bool:
+    """CEAP 'Divulgação da atividade parlamentar' (both houses, spelling varies)."""
+    return normalize_name(category).startswith("divulgacao da atividade parlamentar")
 
 
-def _summarize_expenses(items: list[dict[str, Any]], limit: int) -> dict[str, Any]:
+def _summarize_expenses(
+    items: list[dict[str, Any]],
+    limit: int,
+    institutional_categories: set[str] | frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """Aggregate normalized expense items into totals, categories and top suppliers."""
     total = 0.0
     categories: dict[str, float] = {}
@@ -52,7 +61,7 @@ def _summarize_expenses(items: list[dict[str, Any]], limit: int) -> dict[str, An
             suppliers[key] = {"fornecedor": item["fornecedor"], "cnpj_cpf": item["cnpj_cpf"], "total": 0.0}
         suppliers[key]["total"] += val
 
-        if not item.get("documento_url"):
+        if not item.get("documento_url") and item["tipo"] not in institutional_categories:
             without_receipt["quantidade"] += 1
             without_receipt["valor"] += val
 
@@ -93,6 +102,70 @@ async def _load_deputy_ceap_bulk(dep_id: int, year: int) -> tuple[list[dict[str,
         _ceap_rows_cache[key] = await asyncio.to_thread(_scan_ceap_file, path, dep_id)
 
     return _ceap_rows_cache[key], {"fonte": url, "idade_arquivo_horas": cached_file_age_hours(path)}
+
+
+def _scan_camara_house(path: Path) -> dict[str, Any]:
+    """One pass over the yearly CEAP file: per-deputy, per-category counts and values."""
+    per_dep: dict[str, dict[str, Any]] = {}
+    cat_totals: dict[str, list[int]] = {}
+    for row in iter_csv_rows(path):
+        dep_id = row.get("ideCadastro")
+        if not dep_id:  # party leaderships and other non-deputy cost centers
+            continue
+        cat = row.get("txtDescricao") or "Outros"
+        val = parse_brl_number(row.get("vlrLiquido"))
+        missing = not row.get("urlDocumento")
+
+        dep = per_dep.setdefault(dep_id, {
+            "nome": row.get("txNomeParlamentar"), "partido": row.get("sgPartido"),
+            "uf": row.get("sgUF"), "categorias": {},
+        })
+        c = dep["categorias"].setdefault(cat, [0, 0.0, 0, 0.0])  # n, valor, n_sem_url, valor_sem_url
+        c[0] += 1
+        c[1] += val
+        if missing:
+            c[2] += 1
+            c[3] += val
+
+        t = cat_totals.setdefault(cat, [0, 0])
+        t[0] += 1
+        t[1] += missing
+
+    institutional = {
+        cat for cat, (n, n_missing) in cat_totals.items()
+        if n and n_missing / n >= INSTITUTIONAL_NO_RECEIPT_SHARE
+    }
+
+    parlamentares = {}
+    for dep_id, dep in per_dep.items():
+        cats = dep.pop("categorias")
+        parlamentares[int(dep_id)] = {
+            **dep,
+            "n": sum(c[0] for c in cats.values()),
+            "total": sum(c[1] for c in cats.values()),
+            "divulgacao_n": sum(c[0] for k, c in cats.items() if is_self_promotion_category(k)),
+            "divulgacao_valor": sum(c[1] for k, c in cats.items() if is_self_promotion_category(k)),
+            "n_comprovavel": sum(c[0] for k, c in cats.items() if k not in institutional),
+            "valor_comprovavel": sum(c[1] for k, c in cats.items() if k not in institutional),
+            "sem_comprovante_n": sum(c[2] for k, c in cats.items() if k not in institutional),
+            "sem_comprovante_valor": sum(c[3] for k, c in cats.items() if k not in institutional),
+        }
+    return {"parlamentares": parlamentares, "categorias_institucionais": sorted(institutional)}
+
+
+async def camara_ceap_house_stats(year: int) -> dict[str, Any] | None:
+    """
+    House-wide CEAP aggregates for one year: per-deputy totals (the peer reference) and the
+    categories whose receipts the Chamber itself never publishes.
+    """
+    url = CAMARA_CEAP_BULK_URL.format(year=year)
+    path = await fetch_cached_file(url, f"camara/ceap-{year}.csv.zip", cache_max_age(year))
+    if not path:
+        return None
+    key = (year, path.stat().st_mtime)
+    if key not in _camara_house_stats_cache:
+        _camara_house_stats_cache[key] = await asyncio.to_thread(_scan_camara_house, path)
+    return {**_camara_house_stats_cache[key], "fonte": url, "idade_arquivo_horas": cached_file_age_hours(path)}
 
 
 def _deputy_item_from_bulk(row: dict[str, str]) -> dict[str, Any]:
@@ -154,9 +227,22 @@ async def _get_deputy_expenses(
     if month:
         items = [i for i in items if i["mes"] == int(month)]
 
+    house_stats = await camara_ceap_house_stats(target_year)
+    institutional = set(house_stats["categorias_institucionais"]) if house_stats else set()
+
     limitacoes = [
         "Valores líquidos (vlrLiquido), já descontadas glosas; restituições posteriores podem alterar o total.",
     ]
+    if institutional:
+        limitacoes.append(
+            "'despesas_sem_comprovante_digital' ignora categorias faturadas pela própria Câmara, "
+            f"sem comprovante para nenhum deputado: {', '.join(sorted(institutional))}."
+        )
+    else:
+        limitacoes.append(
+            "Não foi possível identificar as categorias sem comprovante por padrão institucional; "
+            "'despesas_sem_comprovante_digital' pode incluí-las."
+        )
     if not meta.get("completo"):
         limitacoes.append("A fonte respondeu de forma incompleta: o total pode estar SUBESTIMADO.")
 
@@ -166,7 +252,7 @@ async def _get_deputy_expenses(
         "casa": HOUSE_LABELS["camara"],
         "ano_referencia": target_year,
         "mes_referencia": month,
-        **_summarize_expenses(items, limit),
+        **_summarize_expenses(items, limit, institutional),
         "metadados": {
             **meta,
             "periodo": f"{target_year}-{int(month):02d}" if month else str(target_year),
@@ -181,19 +267,22 @@ def _load_json_file(path: Path) -> Any:
         return json.load(f)
 
 
-async def _fetch_senator_year(code: int, year: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+async def _load_senado_ceaps(year: int) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
     url = SENADO_CEAPS_URL.format(year=year)
     path = await fetch_cached_file(url, f"senado/ceaps-{year}.json", cache_max_age(year))
     if not path:
-        return [], {"fonte": url, "completo": False}
-
+        return None, {"fonte": url, "completo": False}
     try:
         records = await asyncio.to_thread(_load_json_file, path)
     except ValueError:
-        return [], {"fonte": url, "completo": False}
-    if not isinstance(records, list):
-        records = []
+        return None, {"fonte": url, "completo": False}
+    meta = {"fonte": url, "completo": True, "idade_arquivo_horas": cached_file_age_hours(path), "mtime": path.stat().st_mtime}
+    return (records if isinstance(records, list) else []), meta
 
+
+async def _fetch_senator_year(code: int, year: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    records, meta = await _load_senado_ceaps(year)
+    meta.pop("mtime", None)
     items = [
         {
             "ano": r.get("ano"),
@@ -210,10 +299,34 @@ async def _fetch_senator_year(code: int, year: int) -> tuple[list[dict[str, Any]
         }
         # Matching by the official code, never by name: name substrings collide
         # ('Eduardo' matches both Eduardo Braga and Eduardo Gomes).
-        for r in records
+        for r in (records or [])
         if str(r.get("codSenador")) == str(code)
     ]
-    return items, {"fonte": url, "completo": True, "idade_arquivo_horas": cached_file_age_hours(path)}
+    return items, meta
+
+
+async def senado_ceaps_house_stats(year: int) -> dict[str, Any] | None:
+    """Per-senator CEAPS totals for one year (peer reference)."""
+    records, meta = await _load_senado_ceaps(year)
+    if records is None:
+        return None
+    key = (year, meta.pop("mtime"))
+    if key not in _senado_house_stats_cache:
+        per_sen: dict[int, dict[str, Any]] = {}
+        for r in records:
+            if r.get("codSenador") is None:
+                continue
+            sen = per_sen.setdefault(int(r["codSenador"]), {
+                "nome": r.get("nomeSenador"), "n": 0, "total": 0.0, "divulgacao_n": 0, "divulgacao_valor": 0.0,
+            })
+            val = _normalize_float(r.get("valorReembolsado"))
+            sen["n"] += 1
+            sen["total"] += val
+            if is_self_promotion_category(r.get("tipoDespesa") or ""):
+                sen["divulgacao_n"] += 1
+                sen["divulgacao_valor"] += val
+        _senado_house_stats_cache[key] = {"parlamentares": per_sen}
+    return {**_senado_house_stats_cache[key], "fonte": meta["fonte"], "idade_arquivo_horas": meta["idade_arquivo_horas"]}
 
 
 async def _get_senator_expenses(

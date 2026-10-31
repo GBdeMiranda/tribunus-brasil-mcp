@@ -83,7 +83,7 @@ class TestActivity(unittest.TestCase):
         self.assertEqual(p["ausencia_justificada"], 2)
         self.assertEqual(p["ausencia_nao_justificada"], 1)
         self.assertEqual(p["presente_sem_votar"], 1)
-        self.assertEqual(p["taxa_participacao"], 0.5)
+        self.assertNotIn("taxa_participacao", p)
         self.assertEqual(seen["dataInicio"], "2025-01-01")
         self.assertEqual(res["votacoes"][0]["data"], "2025-03-08")
         self.assertEqual(len(res["votacoes"]), 3)

@@ -2,7 +2,7 @@
 Unambiguous identification of parliamentarians.
 
 Every audit starts here: evaluating the wrong person (a homonym, or a substring match
-such as 'Lira' → 'Átila Lira') invalidates everything downstream, so ambiguous names
+such as 'Lira' -> 'Átila Lira') invalidates everything downstream, so ambiguous names
 are reported back with the candidate list instead of silently picking the first hit.
 """
 

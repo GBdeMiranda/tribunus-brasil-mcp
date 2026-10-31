@@ -35,8 +35,11 @@ SENADO_PRESENT_NO_VOTE = {"P-NRV", "P-OD"}
 SENADO_JUSTIFIED_ABSENCE = {"AP", "MIS", "REP"}
 SENADO_UNJUSTIFIED_ABSENCE = {"NCom"}
 
+# Positions a voter can actually read from the record.
+KNOWN_POSITIONS = {"Sim", "Não", "Abstenção", "Obstrução", "P-OD"}
+
 _camara_votacoes_cache: dict[tuple[int, float], dict[str, dict[str, str]]] = {}
-_camara_votos_cache: dict[tuple[int, int, float], tuple[set[str], list[dict[str, str]]]] = {}
+_camara_votos_cache: dict[tuple[int, int, float], tuple[set[str], list[dict[str, str]], dict[str, int]]] = {}
 
 
 def _period(start_date: str | None, end_date: str | None) -> tuple[str, str]:
@@ -76,7 +79,7 @@ async def _get_deputy_activity(
             "orgaos": [o.get("siglaOrgao") for o in ev.get("orgaos", []) if o.get("siglaOrgao")],
         })
 
-    limitacoes = ["Eventos para os quais o deputado constava na pauta; não equivale a presença registrada."]
+    limitacoes = ["Eventos em cuja pauta o deputado constava."]
     if not complete:
         limitacoes.append("Paginação incompleta: a contagem de eventos pode estar SUBESTIMADA.")
 
@@ -162,7 +165,7 @@ async def _get_senator_activity(
             "periodo": f"{start} a {end}",
             "n_registros": len(speeches_raw),
             "completo": speeches_data is not None,
-            "limitacoes": ["Comissões incluem participações históricas, não apenas as vigentes."],
+            "limitacoes": ["Comissões incluem participações históricas."],
         },
     }
 
@@ -243,7 +246,8 @@ async def _get_senator_votes(
         "participacao_plenario": {
             "votacoes_nominais": total,
             **participation,
-            "taxa_participacao": round(participation["votou"] / total, 4) if total else None,
+            "votacoes_secretas": sum(1 for v in votes if v["votacao_secreta"]),
+            "distribuicao_plenario": dict(positions),
         },
         "votacoes": votes[:limit],
         "metadados": {
@@ -271,22 +275,33 @@ def _scan_camara_votacoes(path: Path) -> dict[str, dict[str, str]]:
     }
 
 
-def _scan_camara_votos(path: Path, dep_id: int) -> tuple[set[str], list[dict[str, str]]]:
-    """One pass over the yearly votes file: every nominal roll call id, plus this deputy's votes."""
+def _scan_camara_votos(
+    path: Path, dep_id: int, plenary_ids: set[str]
+) -> tuple[set[str], list[dict[str, str]], dict[str, int]]:
+    """
+    One pass over the yearly votes file: every nominal roll call id, this deputy's votes,
+    and, for the house reference, each deputy's count of plenary votes with a known position.
+    """
     target = str(dep_id)
     all_ids: set[str] = set()
     own: list[dict[str, str]] = []
+    known_per_deputy: dict[str, int] = {}
     for row in iter_csv_rows(path):
         vid = row.get("idVotacao")
         if not vid:
             continue
         all_ids.add(vid)
-        if row.get("deputado_id") == target:
+        voter = row.get("deputado_id") or ""
+        if vid in plenary_ids and row.get("voto") in KNOWN_POSITIONS:
+            known_per_deputy[voter] = known_per_deputy.get(voter, 0) + 1
+        if voter == target:
             own.append({"idVotacao": vid, "voto": row.get("voto") or "", "dataHoraVoto": row.get("dataHoraVoto") or ""})
-    return all_ids, own
+    return all_ids, own, known_per_deputy
 
 
-async def _load_camara_votes(dep_id: int, year: int) -> tuple[dict[str, dict[str, str]], set[str], list[dict[str, str]], dict[str, Any]] | None:
+async def _load_camara_votes(
+    dep_id: int, year: int
+) -> tuple[dict[str, dict[str, str]], set[str], list[dict[str, str]], dict[str, int], dict[str, Any]] | None:
     max_age = cache_max_age(year)
     votos_url = CAMARA_VOTOS_BULK_URL.format(year=year)
     votacoes_url = CAMARA_VOTACOES_BULK_URL.format(year=year)
@@ -301,13 +316,16 @@ async def _load_camara_votes(dep_id: int, year: int) -> tuple[dict[str, dict[str
     if vkey not in _camara_votacoes_cache:
         _camara_votacoes_cache[vkey] = await asyncio.to_thread(_scan_camara_votacoes, votacoes_path)
 
+    votacoes = _camara_votacoes_cache[vkey]
+    plenary_orgao_ids = {vid for vid, info in votacoes.items() if info.get("orgao") == "PLEN"}
+
     dkey = (year, dep_id, votos_path.stat().st_mtime)
     if dkey not in _camara_votos_cache:
-        _camara_votos_cache[dkey] = await asyncio.to_thread(_scan_camara_votos, votos_path, dep_id)
+        _camara_votos_cache[dkey] = await asyncio.to_thread(_scan_camara_votos, votos_path, dep_id, plenary_orgao_ids)
 
-    all_ids, own = _camara_votos_cache[dkey]
+    all_ids, own, known_per_deputy = _camara_votos_cache[dkey]
     meta = {"fonte": votos_url, "fonte_votacoes": votacoes_url, "idade_arquivo_horas": cached_file_age_hours(votos_path)}
-    return _camara_votacoes_cache[vkey], all_ids, own, meta
+    return votacoes, all_ids, own, known_per_deputy, meta
 
 
 async def _get_deputy_votes(
@@ -332,10 +350,11 @@ async def _get_deputy_votes(
             "error": "Arquivo anual de votações da Câmara indisponível; tente novamente mais tarde.",
         }
 
-    votacoes, all_ids, own, meta = loaded
+    votacoes, all_ids, own, known_per_deputy, meta = loaded
     plenary_ids = {vid for vid in all_ids if votacoes.get(vid, {}).get("orgao") == "PLEN"}
 
     positions: dict[str, int] = {}
+    plenary_positions: dict[str, int] = {}
     voted_plenary: set[str] = set()
     votes: list[dict[str, Any]] = []
     for v in own:
@@ -345,6 +364,7 @@ async def _get_deputy_votes(
         info = votacoes.get(vid, {})
         if vid in plenary_ids:
             voted_plenary.add(vid)
+            plenary_positions[pos] = plenary_positions.get(pos, 0) + 1
         votes.append({
             "votacao_id": vid,
             "data": info.get("data") or v["dataHoraVoto"],
@@ -369,7 +389,7 @@ async def _get_deputy_votes(
             "votacoes_nominais": total_plenary,
             "votou": voted,
             "sem_registro_de_voto": total_plenary - voted,
-            "taxa_participacao": round(voted / total_plenary, 4) if total_plenary else None,
+            "distribuicao_plenario": plenary_positions,
         },
         "votacoes": votes[:limit],
         "metadados": {

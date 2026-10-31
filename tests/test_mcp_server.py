@@ -264,10 +264,12 @@ class TestMcpBrlCongressLive(unittest.TestCase):
     def test_live_evaluate_parliamentarian(self):
         result_json = asyncio.run(evaluateParliamentarian(name="Arthur Lira", house="camara"))
         result = json.loads(result_json)
-        self.assertEqual(result.get("casa"), "Câmara dos Deputados")
-        self.assertIn("avaliacao_qualitativa", result)
-        self.assertIn("resumo_despesas", result)
-
+        self.assertEqual(result["parlamentar"]["casa"], "Câmara dos Deputados")
+        self.assertEqual(
+            set(result["dimensoes"]),
+            {"votacoes_por_eixo", "base_social", "fundo_publico", "publicidade", "agenda_e_discurso"},
+        )
+        self.assertIn("Arthur Lira", result["instrucao"])
 
 if __name__ == "__main__":
     unittest.main()

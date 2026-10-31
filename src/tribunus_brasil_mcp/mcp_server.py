@@ -8,6 +8,7 @@ from .transparency import get_parliamentarian_expenses
 from .activity import _get_deputy_votes, _get_senator_votes, get_parliamentarian_activity, get_parliamentarian_votes
 from .identity import resolve_parliamentarian
 from .evaluation import evaluate_parliamentarian
+from .publicity import audit_publicity
 from .themes import search_congressional_themes
 
 mcp = FastMCP("tribunus-brasil-mcp")
@@ -324,18 +325,63 @@ async def evaluateParliamentarian(
     house: str = "auto",
     year: int | None = None,
     parliamentarianId: int | None = None,
+    desde: int | None = None,
 ) -> str:
     """
-    Consolidate biographical data, CEAP expenses, institutional activity, and voting records into a qualitative evaluation.
+    Investigative roadmap of a Brazilian parliamentarian's mandate from the standpoint of working
+    people: whom the mandate serves in practice. Votes are read against the Constitution's social
+    and labor rights; the mandate's use of public money against the principles of its art. 37.
+
+    The response carries the data and an `instrucao` field. Write the evaluation for the user by
+    following `instrucao`: it defines the normative reference, how to read each bill, the axes and
+    the criteria.
+
+    Data: every merit vote in plenary classified into thematic axes by the houses' official themes
+    (result, margin, party majority, government orientation, positioning under each government,
+    absences in contested votes); parliamentary fronts and committees; individual amendments by
+    destination and territory; publicity indicators; bills and speeches.
 
     Args:
         name: Name of the parliamentarian.
         house: Legislative house to search. Options: 'auto', 'senado', or 'camara'. Default: 'auto'.
-        year: Reference year for expenditure and activity analysis.
+        year: Reference year for the publicity dimension. Defaults to the last complete year.
+        parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
+        desde: First year of votes to analyze. Defaults to the start of the current legislature; use an earlier year (e.g. 2019) to compare behavior across governments.
+    """
+    result = await evaluate_parliamentarian(
+        name, house=house, year=year, parliamentarian_id=parliamentarianId, desde=desde
+    )
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+@mcp.tool()
+async def auditPublicity(
+    name: str = "",
+    house: str = "auto",
+    year: int | None = None,
+    parliamentarianId: int | None = None,
+) -> str:
+    """
+    Audit a parliamentarian under the constitutional principle of Publicidade (CF art. 37).
+    Write the assessment for the user by following the `instrucao` field of the response.
+
+    Checks whether a citizen can know how public money was spent and how the parliamentarian voted:
+    CEAP receipts published, supplier traceability against the Receita Federal registry,
+    paid self-promotion (also in minimum wages), traceability of budget amendments
+    (including 'emendas Pix'), and plenary votes with a publicly known position.
+
+    Every indicator gives absolute counts and R$ values next to their base
+    and percentage, house-wide context, evidence, limitations, and accountability questions.
+    Needs no API key.
+
+    Args:
+        name: Name of the parliamentarian.
+        house: Legislative house to search. Options: 'auto', 'senado', or 'camara'. Default: 'auto'.
+        year: Reference year. Defaults to the last complete year.
         parliamentarianId: Official id (Senate CodigoParlamentar or Chamber deputy id). Takes precedence over name; use it when a name is ambiguous.
     """
-    result = await evaluate_parliamentarian(name, house=house, year=year, parliamentarian_id=parliamentarianId)
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    result = await audit_publicity(name, house=house, year=year, parliamentarian_id=parliamentarianId)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
 @mcp.tool()
@@ -361,6 +407,16 @@ async def searchCongressionalThemes(
     """
     result = await search_congressional_themes(theme, house=house, limit=limit, year=year)
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.prompt()
+def avaliarParlamentar(nome: str, casa: str = "auto") -> str:
+    """Parecer socioeconômico sobre o mandato de um deputado ou senador."""
+    return (
+        f"Use a ferramenta evaluateParliamentarian para {nome} (casa: {casa}). "
+        "Com a resposta, escreva o parecer seguindo exatamente o campo `instrucao`, "
+        "fundamentado nos dados retornados."
+    )
 
 
 def main():
